@@ -22,7 +22,7 @@ import uuid
 load_dotenv()
 
 # Check HF_TOKEN and attempt login (optional for public models)
-hf_token = os.getenv("HF_TOKEN")
+hf_token=os.environ["HF_TOKEN"] = os.getenv("HF_TOKEN")
 if hf_token:
     try:
         login(token=hf_token)
@@ -34,7 +34,6 @@ else:
 
 # Environment variables setup
 os.environ["GROQ_API_KEY"] = os.getenv("GROQ_API_KEY")
-os.environ["HF_TOKEN"] = os.getenv("HF_TOKEN") if os.getenv("HF_TOKEN") else ""
 
 # Retry logic for embeddings
 def load_embeddings(model_name, retries=3):
