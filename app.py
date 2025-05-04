@@ -12,34 +12,34 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
-from huggingface_hub import login
 import os
 from dotenv import load_dotenv
 import time
 import uuid
+import warnings
+
+# Suppress warnings from huggingface_hub
+warnings.filterwarnings("ignore", category=UserWarning, module="huggingface_hub")
 
 # Load environment variables
 load_dotenv()
 
-# Check HF_TOKEN and attempt login (optional for public models)
-hf_token=os.environ["HF_TOKEN"] = os.getenv("HF_TOKEN")
-if hf_token:
-    try:
-        login(token=hf_token)
-        st.write("Successfully logged in to Hugging Face Hub")
-    except Exception as e:
-        st.warning(f"Failed to log in to Hugging Face Hub: {str(e)}. Proceeding without authentication (public model)")
-else:
-    st.warning("HF_TOKEN not found. Proceeding without authentication (public model)")
+# Clear any cached Hugging Face token
+os.environ.pop("HF_TOKEN", None)  # Remove HF_TOKEN to avoid invalid auth
+os.environ["HF_TOKEN"] = ""  # Set to empty to ensure no auth header
 
 # Environment variables setup
 os.environ["GROQ_API_KEY"] = os.getenv("GROQ_API_KEY")
+os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGCHAIN_API_KEY") or ""
+
+# Debug environment variables
+st.write("Environment variables:", {k: v for k, v in os.environ.items() if k in ["HF_TOKEN", "GROQ_API_KEY", "LANGCHAIN_API_KEY"]})
 
 # Retry logic for embeddings
 def load_embeddings(model_name, retries=3):
     for attempt in range(retries):
         try:
-            return HuggingFaceEmbeddings(model_name=model_name)
+            return HuggingFaceEmbeddings(model_name=model_name, model_kwargs={"trust_remote_code": False})
         except Exception as e:
             if attempt == retries - 1:
                 st.error(f"Failed to load embeddings for {model_name} after {retries} attempts: {str(e)}")
