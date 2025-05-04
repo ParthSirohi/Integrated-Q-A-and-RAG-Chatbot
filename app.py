@@ -12,18 +12,41 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
+from huggingface_hub import login
 import os
 from dotenv import load_dotenv
+import time
 import uuid
 
 # Load environment variables
 load_dotenv()
 
+# Log in to Hugging Face Hub
+hf_token = os.getenv("HF_TOKEN")
+if hf_token:
+    login(token=hf_token)
+
 # Environment variables setup
 os.environ["GROQ_API_KEY"] = os.getenv("GROQ_API_KEY")
 os.environ["HF_TOKEN"] = os.getenv("HF_TOKEN")
-embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-MiniLM-L3-v2")
 
+# Retry logic for embeddings
+def load_embeddings(model_name, retries=3):
+    for attempt in range(retries):
+        try:
+            return HuggingFaceEmbeddings(model_name=model_name)
+        except Exception as e:
+            if attempt == retries - 1:
+                st.error(f"Failed to load embeddings after {retries} attempts: {str(e)}")
+                raise
+            st.warning(f"Retry {attempt + 1}/{retries} due to: {str(e)}")
+            time.sleep(2)  # Wait before retrying
+
+try:
+    embeddings = load_embeddings("sentence-transformers/paraphrase-MiniLM-L3-v2")
+except Exception as e:
+    st.error(f"Cannot initialize embeddings: {str(e)}")
+    st.stop()
 # Langsmith Tracking
 os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGCHAIN_API_KEY")
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
