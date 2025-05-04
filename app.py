@@ -21,10 +21,41 @@ import uuid
 # Load environment variables
 load_dotenv()
 
+import streamlit as st
+from langchain_groq import ChatGroq
+from langchain_core.output_parsers import StrOutputParser
+from langchain.chains import create_history_aware_retriever
+from langchain_core.runnables import RunnableMap, RunnableLambda
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.vectorstores import FAISS
+from langchain_community.chat_message_histories import ChatMessageHistory
+from langchain_core.chat_history import BaseChatMessageHistory
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import PyPDFLoader
+from huggingface_hub import login
+import os
+from dotenv import load_dotenv
+import time
+import uuid
+
+# Load environment variables
+load_dotenv()
+
 # Log in to Hugging Face Hub
 hf_token = os.getenv("HF_TOKEN")
 if hf_token:
-    login(token=hf_token)
+    try:
+        login(token=hf_token)
+        st.write("Successfully logged in to Hugging Face Hub")
+    except Exception as e:
+        st.error(f"Failed to log in to Hugging Face Hub: {str(e)}")
+        st.stop()
+else:
+    st.error("HF_TOKEN not found in environment variables")
+    st.stop()
 
 # Environment variables setup
 os.environ["GROQ_API_KEY"] = os.getenv("GROQ_API_KEY")
@@ -37,16 +68,26 @@ def load_embeddings(model_name, retries=3):
             return HuggingFaceEmbeddings(model_name=model_name)
         except Exception as e:
             if attempt == retries - 1:
-                st.error(f"Failed to load embeddings after {retries} attempts: {str(e)}")
+                st.error(f"Failed to load embeddings for {model_name} after {retries} attempts: {str(e)}")
                 raise
-            st.warning(f"Retry {attempt + 1}/{retries} due to: {str(e)}")
-            time.sleep(2)  # Wait before retrying
+            st.warning(f"Retry {attempt + 1}/{retries} for {model_name} due to: {str(e)}")
+            time.sleep(5)  # Increased wait time
+
+# Try primary model, fall back to alternative if it fails
+primary_model = "sentence-transformers/paraphrase-MiniLM-L3-v2"
+fallback_model = "sentence-transformers/all-MiniLM-L6-v2"
 
 try:
-    embeddings = load_embeddings("sentence-transformers/paraphrase-MiniLM-L3-v2")
+    embeddings = load_embeddings(primary_model)
+    st.write(f"Loaded embeddings: {primary_model}")
 except Exception as e:
-    st.error(f"Cannot initialize embeddings: {str(e)}")
-    st.stop()
+    st.warning(f"Primary model {primary_model} failed: {str(e)}. Trying fallback model {fallback_model}")
+    try:
+        embeddings = load_embeddings(fallback_model)
+        st.write(f"Loaded fallback embeddings: {fallback_model}")
+    except Exception as e:
+        st.error(f"Cannot initialize embeddings with fallback model {fallback_model}: {str(e)}")
+        st.stop()
 # Langsmith Tracking
 os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGCHAIN_API_KEY")
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
