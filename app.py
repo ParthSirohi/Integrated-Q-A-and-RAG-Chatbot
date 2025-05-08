@@ -14,54 +14,15 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
 import os
 from dotenv import load_dotenv
-import time
 import uuid
-import warnings
-
-# Suppress warnings from huggingface_hub
-warnings.filterwarnings("ignore", category=UserWarning, module="huggingface_hub")
 
 # Load environment variables
 load_dotenv()
 
-# Clear any cached Hugging Face token
-os.environ.pop("HF_TOKEN", None)  # Remove HF_TOKEN to avoid invalid auth
-os.environ["HF_TOKEN"] = ""  # Set to empty to ensure no auth header
-
 # Environment variables setup
 os.environ["GROQ_API_KEY"] = os.getenv("GROQ_API_KEY")
-os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGCHAIN_API_KEY") or ""
-
-# Debug environment variables
-st.write("Environment variables:", {k: v for k, v in os.environ.items() if k in ["HF_TOKEN", "GROQ_API_KEY", "LANGCHAIN_API_KEY"]})
-
-# Retry logic for embeddings
-def load_embeddings(model_name, retries=3):
-    for attempt in range(retries):
-        try:
-            return HuggingFaceEmbeddings(model_name=model_name, model_kwargs={"trust_remote_code": False})
-        except Exception as e:
-            if attempt == retries - 1:
-                st.error(f"Failed to load embeddings for {model_name} after {retries} attempts: {str(e)}")
-                raise
-            st.warning(f"Retry {attempt + 1}/{retries} for {model_name} due to: {str(e)}")
-            time.sleep(5)
-
-# Try primary model, fall back to alternative if it fails
-primary_model = "sentence-transformers/paraphrase-MiniLM-L3-v2"
-fallback_model = "sentence-transformers/all-MiniLM-L6-v2"
-
-try:
-    embeddings = load_embeddings(primary_model)
-    st.write(f"Loaded embeddings: {primary_model}")
-except Exception as e:
-    st.warning(f"Primary model {primary_model} failed: {str(e)}. Trying fallback model {fallback_model}")
-    try:
-        embeddings = load_embeddings(fallback_model)
-        st.write(f"Loaded fallback embeddings: {fallback_model}")
-    except Exception as e:
-        st.error(f"Cannot initialize embeddings with fallback model {fallback_model}: {str(e)}")
-        st.stop()
+os.environ["HF_TOKEN"] = os.getenv("HF_TOKEN")
+embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-MiniLM-L3-v2")
 
 # Langsmith Tracking
 os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGCHAIN_API_KEY")
@@ -127,92 +88,83 @@ if api_key:
                 with open(temppdf, "wb") as file:
                     file.write(uploaded_file.getvalue())
                 loader = PyPDFLoader(temppdf)
-                try:
-                    docs = loader.load()
-                    documents.extend(docs)
-                except Exception as e:
-                    st.error(f"Error loading PDF {uploaded_file.name}: {str(e)}")
-                    continue
-                finally:
-                    if os.path.exists(temppdf):
-                        os.remove(temppdf)  # Clean up temp file
+                docs = loader.load()
+                documents.extend(docs)
+                os.remove(temppdf)  # Clean up temp file
 
-            if documents:
-                # Split and create embeddings
-                text_splitter = RecursiveCharacterTextSplitter(chunk_size=5000, chunk_overlap=500)
-                splits = text_splitter.split_documents(documents)
-                vectorstore = FAISS.from_documents(splits, embeddings)
-                base_retriever = vectorstore.as_retriever()
+            # Split and create embeddings
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=5000, chunk_overlap=500)
+            splits = text_splitter.split_documents(documents)
+            vectorstore = FAISS.from_documents(splits, embeddings)
+            base_retriever = vectorstore.as_retriever()
 
-                # Contextualize question prompt
-                contextualize_q_system_prompt = (
-                    "Given a chat history and the latest user question, "
-                    "which might reference context in the chat history, "
-                    "formulate a standalone question that can be understood "
-                    "without the chat history. DO NOT answer the question, "
-                    "just reformulate it if needed and otherwise return it as is."
+            # Contextualize question prompt
+            contextualize_q_system_prompt = (
+                "Given a chat history and the latest user question, "
+                "which might reference context in the chat history, "
+                "formulate a standalone question that can be understood "
+                "without the chat history. DO NOT answer the question, "
+                "just reformulate it if needed and otherwise return it as is."
+            )
+            contextualize_q_prompt = ChatPromptTemplate.from_messages([
+                ("system", contextualize_q_system_prompt),
+                MessagesPlaceholder("chat_history"),
+                ("human", "{input}")
+            ])
+
+            history_aware_retriever = create_history_aware_retriever(
+                llm, base_retriever, contextualize_q_prompt
+            )
+
+            # Answer question prompt
+            system_prompt = (
+                "You are an assistant for question-answering tasks. "
+                "Use the following pieces of retrieved context to answer the question. "
+                "If you don't know the answer, just say that you don't know. "
+                "Use three sentences or less to answer the question.\n\n"
+                "{context}"
+            )
+            qa_prompt = ChatPromptTemplate.from_messages([
+                ("system", system_prompt),
+                MessagesPlaceholder("chat_history"),
+                ("human", "{input}")
+            ])
+
+            # Create RAG chain
+            question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
+            rag_chain = RunnableMap({
+                "context": history_aware_retriever,
+                "input": lambda x: x["input"],
+                "chat_history": lambda x: x["chat_history"]
+            }) | question_answer_chain
+
+            # Session history management
+            def get_session_history(session: str) -> BaseChatMessageHistory:
+                if session not in st.session_state.store:
+                    st.session_state.store[session] = ChatMessageHistory()
+                return st.session_state.store[session]
+
+            conversational_rag_chain = RunnableWithMessageHistory(
+                rag_chain,
+                get_session_history,
+                input_messages_key="input",
+                history_messages_key="chat_history",
+                output_messages_key="answer"
+            )
+
+            user_input = st.text_input("Enter your question about the documents", key="doc_qa_input")
+            if user_input:
+                session_history = get_session_history(session_id)
+                config = {
+                    "configurable": {"session_id": session_id},
+                    "chat_history": session_history.messages
+                }
+                response = conversational_rag_chain.invoke(
+                    {"input": user_input},
+                    config=config
                 )
-                contextualize_q_prompt = ChatPromptTemplate.from_messages([
-                    ("system", contextualize_q_system_prompt),
-                    MessagesPlaceholder("chat_history"),
-                    ("human", "{input}")
-                ])
-
-                history_aware_retriever = create_history_aware_retriever(
-                    llm, base_retriever, contextualize_q_prompt
-                )
-
-                # Answer question prompt
-                system_prompt = (
-                    "You are an assistant for question-answering tasks. "
-                    "Use the following pieces of retrieved context to answer the question. "
-                    "If you don't know the answer, just say that you don't know. "
-                    "Use three sentences or less to answer the question.\n\n"
-                    "{context}"
-                )
-                qa_prompt = ChatPromptTemplate.from_messages([
-                    ("system", system_prompt),
-                    MessagesPlaceholder("chat_history"),
-                    ("human", "{input}")
-                ])
-
-                # Create RAG chain
-                question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
-                rag_chain = RunnableMap({
-                    "context": history_aware_retriever,
-                    "input": lambda x: x["input"],
-                    "chat_history": lambda x: x["chat_history"]
-                }) | question_answer_chain
-
-                # Session history management
-                def get_session_history(session: str) -> BaseChatMessageHistory:
-                    if session not in st.session_state.store:
-                        st.session_state.store[session] = ChatMessageHistory()
-                    return st.session_state.store[session]
-
-                conversational_rag_chain = RunnableWithMessageHistory(
-                    rag_chain,
-                    get_session_history,
-                    input_messages_key="input",
-                    history_messages_key="chat_history",
-                    output_messages_key="answer"
-                )
-
-                user_input = st.text_input("Enter your question about the documents", key="doc_qa_input")
-                if user_input:
-                    session_history = get_session_history(session_id)
-                    config = {
-                        "configurable": {"session_id": session_id},
-                        "chat_history": session_history.messages
-                    }
-                    response = conversational_rag_chain.invoke(
-                        {"input": user_input},
-                        config=config
-                    )
-                    st.write("**Assistant:**", response)
-                    st.write("**Chat History:**", session_history.messages)
-            else:
-                st.error("No valid PDFs were loaded. Please try again.")
+                st.write("**Assistant:**", response)
+                st.write("**Chat History:**", session_history.messages)
         else:
             st.write("Please upload PDF files to start querying.")
 else:
